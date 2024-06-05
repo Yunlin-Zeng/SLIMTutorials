@@ -1,4 +1,6 @@
 
+a, b, c = parse.(Int, ARGS)
+
 function loss(G, X)
     batch_size = size(X)[end]
     
