@@ -10,46 +10,47 @@ PyPlot.rc("font", family="serif");
 # Turn off interactive plotting
 PyPlot.ioff()
 
-seed = parse(Int, ARGS[1])
-println("seed = ", seed)
-s = ARGS[2] 
-s_clean = replace(s, r"[\(\)]" => "")  # Remove parentheses
-numbers_str = split(s_clean, ", ")  # Split the string by comma and space
-n_train, n_noise, repeat_train, repeat_noise = parse.(Int, numbers_str)
-println(numbers_str)
+# seed = parse(Int, ARGS[1])
+# println("seed = ", seed)
+# s = ARGS[2] 
+# s_clean = replace(s, r"[\(\)]" => "")  # Remove parentheses
+# numbers_str = split(s_clean, ", ")  # Split the string by comma and space
+# n_train, n_noise, repeat_train, repeat_noise = parse.(Int, numbers_str)
+# println(numbers_str)
 
 ### Define multivarate Gaussian distribtion
+function def_MvNormal(seed) 
+    # Model and data dimension
+    dim_model = 2
+    dim_data  = 2
+    
+    # Prior distribution
+    μ_x = 3.14f0*ones(Float32, dim_model)
+    σ_x = 1.0f0
+    Σ_x = σ_x^2*I
+    Λ_x = inv(Σ_x)
+    
+    π_x = MvNormal(μ_x, Σ_x)
+    
+    # Distribution of noise
+    μ_ϵ = 0.0f0*ones(Float32, dim_data)
+    σ_ϵ = 0.2f0
+    Σ_ϵ = σ_ϵ^2*I
+    Λ_ϵ = inv(Σ_ϵ)
+    
+    π_ϵ = MvNormal(μ_ϵ, Σ_ϵ)
+    
+    # Forward operator
+    Random.seed!(seed)
+    A = randn(Float32, dim_data, dim_model) #/ sqrt(dim_model*1.0f0)
+    
+    # Analytic posterior distribution
+    Σ_post = inv(Λ_x + A'*Λ_ϵ*A)
+    R = cholesky(Σ_post, check=false).L
+    standard_normal = MvNormal(zeros(Float32, dim_model), 1.0f0*I)
+end
 
-# Model and data dimension
-dim_model = 2
-dim_data  = 2
-
-# Prior distribution
-μ_x = 3.14f0*ones(Float32, dim_model)
-σ_x = 1.0f0
-Σ_x = σ_x^2*I
-Λ_x = inv(Σ_x)
-
-π_x = MvNormal(μ_x, Σ_x)
-
-# Distribution of noise
-μ_ϵ = 0.0f0*ones(Float32, dim_data)
-σ_ϵ = 0.2f0
-Σ_ϵ = σ_ϵ^2*I
-Λ_ϵ = inv(Σ_ϵ)
-
-π_ϵ = MvNormal(μ_ϵ, Σ_ϵ)
-
-# Forward operator
-Random.seed!(seed)
-A = randn(Float32, dim_data, dim_model) #/ sqrt(dim_model*1.0f0)
-
-# Analytic posterior distribution
-Σ_post = inv(Λ_x + A'*Λ_ϵ*A)
-R = cholesky(Σ_post, check=false).L
-standard_normal = MvNormal(zeros(Float32, dim_model), 1.0f0*I)
-
-function post_dist_sample(y)
+function post_dist_sample(y_test)
   return R*rand(standard_normal) + post_dist_mean(reshape(y_test,:,size(y_test)[end]))[:]
 end
 
@@ -59,35 +60,28 @@ end
 
 
 ### Prepare training data
+function prep_train_data(n_train, n_noise, repeat_train, repeat_noise)
+    nx = 1  # Express n-Dim variables as n channels
+    ny = 1  # Express n-Dim variables as n channels
+    n_in = dim_model  # Express n-Dim variables as n channels
+    
+    X_train1 = rand(π_x, n_train)
+    X_train = reshape(X_train1, nx, ny, dim_model, n_train)
+    e_train = rand(π_ϵ, n_noise)
+    
+    X_train1 = cat([X_train1 for _ in 1:repeat_train]..., dims=2)
+    X_train = cat([X_train for _ in 1:repeat_train]..., dims=4)
+    e_train = cat([e_train for _ in 1:repeat_noise]..., dims=2)
+    
+    Y_train = reshape(A * X_train1 + e_train, nx, ny, dim_model, n_noise*repeat_noise);
+    
+    plot_num = min(100, n_train)
 
-nx = 1  # Express n-Dim variables as n channels
-ny = 1  # Express n-Dim variables as n channels
-n_in = dim_model  # Express n-Dim variables as n channels
-# n_train = 35
-# n_noise = n_train
-# 
-# if n_noise/n_train > 1
-#     repeat_train = Integer(n_noise/n_train)
-#     repeat_noise = 1
-# else
-#     repeat_train = repeat_noise = 2
-# end
-
-X_train1 = rand(π_x, n_train)
-X_train = reshape(X_train1, nx, ny, dim_model, n_train)
-e_train = rand(π_ϵ, n_noise)
-
-X_train1 = cat([X_train1 for _ in 1:repeat_train]..., dims=2)
-X_train = cat([X_train for _ in 1:repeat_train]..., dims=4)
-e_train = cat([e_train for _ in 1:repeat_noise]..., dims=2)
-
-Y_train = reshape(A * X_train1 + e_train, nx, ny, dim_model, n_noise*repeat_noise);
-
-plot_num = min(100, n_train)
+    return X_train, Y_train, e_train, plot_num
+end
 
 
 ### Training an NF
-
 function loss(H, X, Y)
     batch_size = size(X)[end]
     
@@ -128,35 +122,37 @@ depth = 10
 
 # Construct HINT network
 H = NetworkConditionalHINT(n_in, n_hidden, depth; k1=1, k2=1, p1=0, p2=0)
-
-# Training
-nepochs = 30
-lr      = 5f-4
-lr_decay_step = 90
-
-# compose adam optimizer with exponential learning rate decay
-opt = Flux.Optimiser(ExpDecay(lr, .9f0, lr_decay_step, 1f-6), Flux.ADAM(lr))
-
-loss_l2_list    = []
-loss_lgdet_list = []
-
-for ep = 1:nepochs
-    for (X, Y) in minibatches
-
-        losses = loss(H, X, Y)
-        # loss_l2_list[j]    = losses[1]
-        # loss_lgdet_list[j] = losses[2]
-        push!(loss_l2_list, losses[1])
-        push!(loss_lgdet_list, losses[2])
-
-        # print("Iter : iteration=", j, "/", maxiter, ", batch=",
-        #         "; f l2 = ",   loss_l2_list[j],
-        #         "; f lgdet = ",loss_lgdet_list[j],
-        #         "; f nll objective = ",loss_l2_list[j] - loss_lgdet_list[j], "\n")
-
-        # Update params
-        for p in get_params(H)
-            Flux.update!(opt, p.data, p.grad)
+    
+function train()
+    # Training
+    nepochs = 30
+    lr      = 5f-4
+    lr_decay_step = 90
+    
+    # compose adam optimizer with exponential learning rate decay
+    opt = Flux.Optimiser(ExpDecay(lr, .9f0, lr_decay_step, 1f-6), Flux.ADAM(lr))
+    
+    loss_l2_list    = []
+    loss_lgdet_list = []
+    
+    for ep = 1:nepochs
+        for (X, Y) in minibatches
+    
+            losses = loss(H, X, Y)
+            # loss_l2_list[j]    = losses[1]
+            # loss_lgdet_list[j] = losses[2]
+            push!(loss_l2_list, losses[1])
+            push!(loss_lgdet_list, losses[2])
+    
+            # print("Iter : iteration=", j, "/", maxiter, ", batch=",
+            #         "; f l2 = ",   loss_l2_list[j],
+            #         "; f lgdet = ",loss_lgdet_list[j],
+            #         "; f nll objective = ",loss_l2_list[j] - loss_lgdet_list[j], "\n")
+    
+            # Update params
+            for p in get_params(H)
+                Flux.update!(opt, p.data, p.grad)
+            end
         end
     end
 end
@@ -193,11 +189,11 @@ end
 
 ### Testing a Conditional Normalizing Flow
 
-num_test_samples = 500;
-Zx_test = randn(Float32,nx,ny,n_in, num_test_samples);
-Zy_test = randn(Float32,nx,ny,n_in, num_test_samples);
-
-X_test, Y_test = H.inverse(Zx_test, Zy_test);
+# num_test_samples = 500;
+# Zx_test = randn(Float32,nx,ny,n_in, num_test_samples);
+# Zy_test = randn(Float32,nx,ny,n_in, num_test_samples);
+# 
+# X_test, Y_test = H.inverse(Zx_test, Zy_test);
 
 
 ### generated samples
@@ -288,4 +284,12 @@ function plot_samples()
 end
 
 
+
+for seed in seeds
+    for arg in args
+        n_train, n_noise, repeat_train, repeat_noise = arg
+        train()
+        sample(seed)
+    end
+end
 
